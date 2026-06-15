@@ -2,14 +2,23 @@
 
 [![arXiv](https://img.shields.io/badge/arXiv-2606.14383-b31b1b.svg)](https://arxiv.org/abs/2606.14383)
 [![Dataset](https://img.shields.io/badge/HuggingFace-Dataset-FFD21E.svg)](https://huggingface.co/datasets/alibaba-multimodal-industrial-ai/IndustryBench-MIPU)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE.txt)
 
-**Multi-Image Industrial Product Understanding Benchmark** — evaluating MLLMs on structured attribute extraction from industrial product images.
+**Multi-Image Industrial Product Understanding Benchmark** — evaluating MLLMs on structured attribute extraction from real-world industrial product images.
 
 <p align="center">
   <img src="figs/intro.png" width="100%">
 </p>
 
 Industrial product specifications are scattered across multiple heterogeneous images — specification tables, nameplates, technical drawings. **IndustryBench-MIPU** tests whether MLLMs can reliably recover them through four challenges: text recognition, visual reasoning, domain knowledge, and cross-image evidence integration.
+
+## Key Features
+
+- **4,559 products** across 18 industrial categories with 182K+ image-level annotations
+- **Two evaluation granularities**: single-image and multi-image (cross-image reasoning)
+- **Plug-and-play evaluation code**: OpenAI-compatible & Anthropic APIs supported out of the box
+- **Cascaded judge**: rule-based normalization + LLM semantic matching for robust evaluation
+- **Multi-model consensus construction**: 5 frontier MLLMs annotate independently, union-deduplicated, triple QA
 
 ---
 
@@ -28,9 +37,12 @@ Industrial product specifications are scattered across multiple heterogeneous im
 
 </div>
 
-Two evaluation granularities:
-- **Single-image** (`single_image_level.jsonl`) — extract attributes visible in one image
-- **Multi-image** (`multi_image_level.jsonl`) — extract all attributes from a product's full image set
+Two evaluation settings:
+
+| Setting | File | Granularity | Description |
+|---------|------|-------------|-------------|
+| Single-image | `single_image_level.jsonl` | Per image | Extract attributes visible in one image |
+| Multi-image | `multi_image_level.jsonl` | Per product | Extract all attributes from a product's full image set |
 
 ---
 
@@ -48,39 +60,137 @@ Two evaluation granularities:
 
 ---
 
+## Project Structure
+
+```
+.
+├── code/
+│   ├── run_multi_extract.py      # Multi-image extraction (product-level)
+│   ├── run_single_extract.py     # Single-image extraction (image-level)
+│   ├── run_eval.py               # LLM-based semantic evaluation
+│   ├── aggregate_eval.py         # Compute P / R / F1 metrics
+│   ├── model_client.py           # Unified API client (OpenAI / Anthropic)
+│   ├── utils.py                  # JSON parsing utilities
+│   ├── prompts/                  # Prompt templates
+│   │   ├── extraction_prompt.txt
+│   │   ├── extraction_prompt_single.txt
+│   │   ├── judge_system_prompt.txt
+│   │   └── judge_user_prompt.txt
+│   └── requirements.txt
+├── data/                         # Dataset (download from HuggingFace)
+│   ├── multi_image_level.jsonl
+│   ├── single_image_level.jsonl
+│   └── images/
+└── figs/                         # Figures for README
+```
+
+---
+
 ## Quick Start
 
-```bash
-# 1. Clone data from HuggingFace
-git lfs install
-git clone https://huggingface.co/datasets/alibaba-multimodal-industrial-ai/IndustryBench-MIPU
+### 1. Setup
 
-# 2. Install
+```bash
+git lfs install
+git clone https://huggingface.co/datasets/alibaba-multimodal-industrial-ai/IndustryBench-MIPU data
+
 pip install -r code/requirements.txt
+```
+
+### 2. Configure API credentials
+
+```bash
 export API_KEY="your-api-key"
 export API_BASE_URL="https://your-api-endpoint"
+```
 
-# 3. Run evaluation (Extract → Eval → Aggregate)
+Or pass `--api-key` and `--api-base` directly to each script.
+
+### 3. Run evaluation
+
+The pipeline has three steps: **Extract → Eval → Aggregate**.
+
+<details>
+<summary><b>Multi-image evaluation</b> (product-level, recommended)</summary>
+
+```bash
 cd code
+
+# Extract: send all images of each product to the model
 python run_multi_extract.py \
     --input ../data/multi_image_level.jsonl \
     --output results/extract.jsonl \
     --provider openai --model qwen-plus \
-    --api-key $API_KEY --api-base $API_BASE_URL \
     --workers 10 --request-workers 30 --retry 3 --shuffle
 
+# Eval: semantic matching via LLM judge
 python run_eval.py \
     --input results/extract.jsonl \
     --output results/eval.jsonl \
     --provider openai --model qwen-plus \
-    --api-key $API_KEY --api-base $API_BASE_URL \
     --workers 20 --request-workers 60 --retry 3
 
+# Aggregate: compute P / R / F1
 python aggregate_eval.py \
     --input results/eval.jsonl \
     --bench ../data/multi_image_level.jsonl \
     --extract results/extract.jsonl
 ```
+
+</details>
+
+<details>
+<summary><b>Single-image evaluation</b> (image-level)</summary>
+
+```bash
+cd code
+
+# Extract: one image per request
+python run_single_extract.py \
+    --input ../data/single_image_level.jsonl \
+    --output results/single_extract.jsonl \
+    --provider openai --model qwen-plus \
+    --workers 10 --request-workers 30 --retry 3 --shuffle
+
+# Eval
+python run_eval.py \
+    --input results/single_extract.jsonl \
+    --output results/single_eval.jsonl \
+    --provider openai --model qwen-plus \
+    --workers 20 --request-workers 60 --retry 3
+
+# Aggregate
+python aggregate_eval.py \
+    --input results/single_eval.jsonl \
+    --bench ../data/single_image_level.jsonl \
+    --extract results/single_extract.jsonl
+```
+
+</details>
+
+<details>
+<summary><b>Category-level breakdown</b></summary>
+
+```bash
+python aggregate_eval.py \
+    --input results/eval.jsonl \
+    --bench ../data/multi_image_level.jsonl \
+    --extract results/extract.jsonl \
+    --by cate1_name
+```
+
+Options: `--by cate1_name` (top-level category), `--by cate_name` (leaf category), `--by property_name`.
+
+</details>
+
+---
+
+## Supported Providers
+
+| Provider | `--provider` | Example `--model` | Notes |
+|----------|-------------|-------------------|-------|
+| OpenAI-compatible | `openai` | `qwen-plus`, `gemini-2.5-pro`, `gpt-4o` | Works with DashScope, Vertex, vLLM, etc. |
+| Anthropic | `anthropic` | `claude-sonnet-4-20250514` | Supports `--enable-thinking` for extended reasoning |
 
 ---
 
@@ -106,6 +216,7 @@ python aggregate_eval.py \
 {
   "record_id": "589158697373#detail_3",
   "image_path": "images/589158697373_detail_3.jpg",
+  "cpv_schema": "含量,纯度,...",
   "cpv_results": [{"property_name": "含量", "property_value": "98%"}]
 }
 ```
@@ -114,18 +225,9 @@ python aggregate_eval.py \
 
 ## Evaluation Pipeline
 
-**Extract** → Send product images + metadata to an MLLM, get `{property_name, property_value}` pairs
-
-**Eval** → Cascaded matching: rule-based normalization first, LLM semantic judge for ambiguous cases
-
-**Aggregate** → Precision (correct / predicted), Recall (matched / benchmark), F1
-
-### Supported Providers
-
-| Provider | `--provider` | Notes |
-|----------|-------------|-------|
-| OpenAI-compatible | `openai` | Qwen, Gemini, vLLM, etc. |
-| Anthropic | `anthropic` | Claude, supports `--enable-thinking` |
+- **Extract**: Send product images + metadata to an MLLM, obtain `{property_name, property_value}` pairs
+- **Eval**: Cascaded matching — rule-based normalization first (unit conversion, synonym mapping), LLM semantic judge for ambiguous cases
+- **Aggregate**: Precision = correct / predicted, Recall = matched / benchmark, F1 = harmonic mean
 
 ---
 
@@ -135,13 +237,18 @@ python aggregate_eval.py \
   <img src="figs/main_results.png" width="90%">
 </p>
 
-The dominant pattern: high precision (86–94%) but low recall — the best model recovers only half the product-level attributes.
+The dominant pattern: **high precision (86–94%) but low recall** — the best model recovers only half the product-level attributes. Failures concentrate in dense specification tables, multi-value properties, and domain-specific terminology.
 
 ---
 
 ## Construction Pipeline
 
-The benchmark is built through a semi-automated pipeline: (1) stratified sampling across 18 industrial categories, (2) five MLLMs independently annotate each product via entity recognition → image filtering → per-image extraction, (3) union and semantic deduplication across models, (4) three-tier quality assurance — frontier model audit (23.9% filtered), gold-standard cross-check, and human verification (96.7% pass rate).
+The benchmark is built through a semi-automated pipeline:
+
+1. **Stratified sampling** across 18 industrial categories
+2. **Multi-model annotation** — 5 frontier MLLMs independently annotate via entity recognition → image filtering → per-image extraction
+3. **Union & deduplication** — semantic merging across models
+4. **Three-tier QA** — frontier model audit (23.9% filtered), gold-standard cross-check, human verification (96.7% pass rate)
 
 <p align="center">
   <img src="figs/pipeline.png" width="100%">
@@ -150,9 +257,6 @@ The benchmark is built through a semi-automated pipeline: (1) stratified samplin
 ---
 
 ## Citation
-
-<details>
-<summary>BibTeX</summary>
 
 ```bibtex
 @article{industrybench-mipu,
@@ -164,4 +268,6 @@ The benchmark is built through a semi-automated pipeline: (1) stratified samplin
 }
 ```
 
-</details>
+## License
+
+This project is licensed under the MIT License — see [LICENSE.txt](LICENSE.txt) for details.
