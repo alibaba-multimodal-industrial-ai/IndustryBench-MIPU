@@ -15,14 +15,18 @@ Industrial product specifications are scattered across multiple heterogeneous im
 
 ## Dataset Overview
 
+<div align="center">
+
 | Statistic | Value |
-|-----------|-------|
+|:----------|------:|
 | Products | 4,559 |
 | Valid images | 27,652 |
 | Top-level categories | 18 |
 | Unique property names | 3,564 |
 | Image-level annotations | 182,527 |
 | Product-level annotations | 103,703 |
+
+</div>
 
 Two evaluation granularities:
 - **Single-image** (`single_image_level.jsonl`) — extract attributes visible in one image
