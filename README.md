@@ -139,9 +139,9 @@ python aggregate_eval.py \
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Extract          Eval              Aggregate            │
-│  (MLLM) ──────► (Rule + LLM  ──────► (P / R / F1)      │
-│                   Judge)                                 │
+│  Extract          Eval              Aggregate           │
+│  (MLLM) ──────► (Rule + LLM  ──────► (P / R / F1)       │
+│                   Judge)                                │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -193,7 +193,7 @@ Rank by multi-image F1. The dominant pattern: high precision (86–94%) but low 
 ```bibtex
 @article{industrybench-mipu,
   title={IndustryBench-MIPU: Benchmarking Multi-Image Attribute Value Extraction for Industrial Products},
-  author={Multimodal and Industrial AI Team},
+  author={Multimodal and Industrial AI Team, Alibaba},
   journal={arXiv preprint arXiv:2606.14383},
   year={2026}
 }
