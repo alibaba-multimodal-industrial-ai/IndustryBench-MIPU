@@ -22,18 +22,23 @@ Industrial product specifications are scattered across multiple heterogeneous im
 
 ---
 
+## Main Results
+
+<p align="center">
+  <img src="figs/main_results.png" width="90%">
+</p>
+
+The dominant pattern: **high precision (86–94%) but low recall** — the best model recovers only half the product-level attributes. Failures concentrate in dense specification tables, multi-value properties, and domain-specific terminology.
+
+---
+
 ## Dataset Overview
 
 <div align="center">
 
-| Statistic | Value |
-|:----------|------:|
-| Products | 4,559 |
-| Valid images | 27,652 |
-| Top-level categories | 18 |
-| Unique property names | 3,564 |
-| Image-level annotations | 182,527 |
-| Product-level annotations | 103,703 |
+| Products | Valid Images | Categories | Property Names | Image-level Annotations | Product-level Annotations |
+|:--------:|:-----------:|:----------:|:--------------:|:-----------------------:|:-------------------------:|
+| 4,559 | 27,652 | 18 | 3,564 | 182,527 | 103,703 |
 
 </div>
 
@@ -57,32 +62,6 @@ Two evaluation settings:
 </p>
 
 > **Case Study**: A microscope objective with 7 images and 69 benchmark attributes. The top model achieves 100% precision but only 45% recall — failures concentrate in dense specification tables where the model stops enumerating after 4–5 values.
-
----
-
-## Project Structure
-
-```
-.
-├── code/
-│   ├── run_multi_extract.py      # Multi-image extraction (product-level)
-│   ├── run_single_extract.py     # Single-image extraction (image-level)
-│   ├── run_eval.py               # LLM-based semantic evaluation
-│   ├── aggregate_eval.py         # Compute P / R / F1 metrics
-│   ├── model_client.py           # Unified API client (OpenAI / Anthropic)
-│   ├── utils.py                  # JSON parsing utilities
-│   ├── prompts/                  # Prompt templates
-│   │   ├── extraction_prompt.txt
-│   │   ├── extraction_prompt_single.txt
-│   │   ├── judge_system_prompt.txt
-│   │   └── judge_user_prompt.txt
-│   └── requirements.txt
-├── data/                         # Dataset (download from HuggingFace)
-│   ├── multi_image_level.jsonl
-│   ├── single_image_level.jsonl
-│   └── images/
-└── figs/                         # Figures for README
-```
 
 ---
 
@@ -185,15 +164,6 @@ Options: `--by cate1_name` (top-level category), `--by cate_name` (leaf category
 
 ---
 
-## Supported Providers
-
-| Provider | `--provider` | Example `--model` | Notes |
-|----------|-------------|-------------------|-------|
-| OpenAI-compatible | `openai` | `qwen-plus`, `gemini-2.5-pro`, `gpt-4o` | Works with DashScope, Vertex, vLLM, etc. |
-| Anthropic | `anthropic` | `claude-sonnet-4-20250514` | Supports `--enable-thinking` for extended reasoning |
-
----
-
 ## Data Format
 
 ### Multi-Image Level (`multi_image_level.jsonl`)
@@ -229,15 +199,12 @@ Options: `--by cate1_name` (top-level category), `--by cate_name` (leaf category
 - **Eval**: Cascaded matching — rule-based normalization first (unit conversion, synonym mapping), LLM semantic judge for ambiguous cases
 - **Aggregate**: Precision = correct / predicted, Recall = matched / benchmark, F1 = harmonic mean
 
----
+### Supported Providers
 
-## Main Results
-
-<p align="center">
-  <img src="figs/main_results.png" width="90%">
-</p>
-
-The dominant pattern: **high precision (86–94%) but low recall** — the best model recovers only half the product-level attributes. Failures concentrate in dense specification tables, multi-value properties, and domain-specific terminology.
+| Provider | `--provider` | Example `--model` | Notes |
+|----------|-------------|-------------------|-------|
+| OpenAI-compatible | `openai` | `qwen-plus`, `gemini-2.5-pro`, `gpt-4o` | Works with DashScope, Vertex, vLLM, etc. |
+| Anthropic | `anthropic` | `claude-sonnet-4-20250514` | Supports `--enable-thinking` for extended reasoning |
 
 ---
 
@@ -253,6 +220,32 @@ The benchmark is built through a semi-automated pipeline:
 <p align="center">
   <img src="figs/pipeline.png" width="100%">
 </p>
+
+---
+
+## Project Structure
+
+```
+.
+├── code/
+│   ├── run_multi_extract.py      # Multi-image extraction (product-level)
+│   ├── run_single_extract.py     # Single-image extraction (image-level)
+│   ├── run_eval.py               # LLM-based semantic evaluation
+│   ├── aggregate_eval.py         # Compute P / R / F1 metrics
+│   ├── model_client.py           # Unified API client (OpenAI / Anthropic)
+│   ├── utils.py                  # JSON parsing utilities
+│   ├── prompts/                  # Prompt templates
+│   │   ├── extraction_prompt.txt
+│   │   ├── extraction_prompt_single.txt
+│   │   ├── judge_system_prompt.txt
+│   │   └── judge_user_prompt.txt
+│   └── requirements.txt
+├── data/                         # Dataset (download from HuggingFace)
+│   ├── multi_image_level.jsonl
+│   ├── single_image_level.jsonl
+│   └── images/
+└── figs/                         # Figures for README
+```
 
 ---
 
