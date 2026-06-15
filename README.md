@@ -137,6 +137,8 @@ The dominant pattern: high precision (86–94%) but low recall — the best mode
 
 ## Construction Pipeline
 
+The benchmark is built through a semi-automated pipeline: (1) stratified sampling across 18 industrial categories, (2) five MLLMs independently annotate each product via entity recognition → image filtering → per-image extraction, (3) union and semantic deduplication across models, (4) three-tier quality assurance — frontier model audit (23.9% filtered), gold-standard cross-check, and human verification (96.7% pass rate).
+
 <p align="center">
   <img src="figs/pipeline.png" width="100%">
 </p>
