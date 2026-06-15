@@ -1,0 +1,10 @@
+属性名：${property_name}
+预测值：${predicted_value}
+基准真值列表：${bench_values}
+
+请逐一判断预测值与基准真值列表中每个值是否语义等价，找出所有匹配项，输出JSON：
+{"is_correct": true/false, "matched_bench_values": ["匹配到的bench值1", "bench值2"], "reason": "简短判断理由"}
+
+说明：
+- is_correct: 只要有任何一个匹配即为true
+- matched_bench_values: 所有与预测值语义等价的bench值组成的数组，无匹配时为空数组[]
