@@ -195,6 +195,7 @@ Rank by multi-image F1. The dominant pattern: high precision (86–94%) but low 
   title={IndustryBench-MIPU: Benchmarking Multi-Image Attribute Value Extraction for Industrial Products},
   author={Multimodal and Industrial AI Team, Alibaba},
   journal={arXiv preprint arXiv:2606.14383},
-  year={2026}
+  year={2026},
+  url={https://arxiv.org/abs/2606.14383}
 }
 ```
