@@ -12,6 +12,8 @@
 
 Industrial product specifications are scattered across multiple heterogeneous images — specification tables, nameplates, technical drawings. **IndustryBench-MIPU** tests whether MLLMs can reliably recover them through four challenges: text recognition, visual reasoning, domain knowledge, and cross-image evidence integration.
 
+> 🚧 **Work in Progress** — We are still actively updating the benchmark to further improve its quality. A new version is expected to be released by **late June 2026**.
+
 ## Key Features
 
 - **4,559 products** across 18 industrial categories with 182K+ image-level annotations
