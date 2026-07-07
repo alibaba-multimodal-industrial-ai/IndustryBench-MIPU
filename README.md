@@ -200,7 +200,7 @@ Both use `cpv_schema` as a list of valid property names and `cpv_results` as a d
 ## Evaluation Pipeline
 
 - **Extract**: Send product images + metadata to an MLLM, obtain a `property_name → [values]` mapping
-- **Eval**: Cascaded matching — same-name rule match → same-name cache → cross-name value rule match → same-name LLM semantic judge, with an LLM name-equivalence judge for synonymous property names
+- **Eval**: Cascaded matching — schema check (predicted property not in schema → incorrect) → same-name rule match → same-name cache → rule-based cross-name match (exact / subsequence / equivalence groups / spec-model wildcard with a non-parameter blacklist) → same-name LLM semantic judge
 - **Aggregate**: Precision = correct / predicted, Recall = matched / benchmark, F1 = harmonic mean
 
 ### Supported Providers
@@ -242,8 +242,7 @@ The benchmark is built through a semi-automated pipeline:
 │   │   ├── extraction_prompt_v3_multi.txt   # Multi-image extraction
 │   │   ├── extraction_prompt_v3.txt         # Single-image extraction
 │   │   ├── judge_system_prompt.txt          # Value semantic judge (system)
-│   │   ├── judge_user_prompt.txt            # Value semantic judge (user)
-│   │   └── judge_name_equiv_prompt.txt      # Property-name equivalence judge
+│   │   └── judge_user_prompt.txt            # Value semantic judge (user)
 │   └── requirements.txt
 ├── data/                         # Dataset (download from HuggingFace)
 │   ├── multi_image_level.jsonl
