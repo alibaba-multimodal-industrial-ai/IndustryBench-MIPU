@@ -159,15 +159,14 @@ async def _call_model(
                         for k, v in parsed.items()
                         if str(k).strip() and v not in (None, "", [])
                     ]
-                if cpv:
-                    return {
-                        "status": "success",
-                        "cpv_results": cpv,
-                        "error_type": None,
-                        "attempts": attempts,
-                        "finish_reason": finish_reason,
-                        "raw_output": (response_text or "")[:8000],
-                    }
+                return {
+                    "status": "success",
+                    "cpv_results": cpv,
+                    "error_type": None,
+                    "attempts": attempts,
+                    "finish_reason": finish_reason,
+                    "raw_output": (response_text or "")[:8000],
+                }
 
             if attempt < retry - 1:
                 await asyncio.sleep(2 ** attempt)
