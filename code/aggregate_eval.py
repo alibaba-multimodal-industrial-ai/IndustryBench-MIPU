@@ -19,8 +19,16 @@ Usage:
 import argparse
 import json
 import os
+import re
+import unicodedata
 from collections import defaultdict
 from typing import Any
+
+
+def _norm_name(name: str) -> str:
+    """Normalize a property name for attribution/matching (aligned with run_eval)."""
+    s = unicodedata.normalize("NFKC", (name or "").strip()).upper()
+    return re.sub(r"[^\w]", "", s, flags=re.UNICODE)
 
 
 def _get_matched_bench_values(row: dict) -> list[str]:
@@ -96,60 +104,58 @@ def compute_metrics(
     groups: dict[str, dict] = defaultdict(lambda: {
         "correct": 0,
         "total_pred": 0,
-        "matched_bench_values": defaultdict(set),
+        "recalled": 0,
         "total_bench": 0,
     })
 
+    # --- Precision side: one row per predicted (sub-)value ---
     for row in eval_results:
-        iid = row.get("item_id", "")
-        pname = row.get("property_name", "")
-
-        if group_by:
-            group_key = row.get(group_by, "unknown")
-        else:
-            group_key = "overall"
-
+        group_key = row.get(group_by, "unknown") if group_by else "overall"
         g = groups[group_key]
         g["total_pred"] += 1
         if row.get("is_correct"):
             g["correct"] += 1
-            for mbv in _get_matched_bench_values(row):
-                g["matched_bench_values"][(iid, pname)].add(mbv)
 
+    # --- Coverage index: gold values covered by any prediction, attributed to
+    #     the GOLD property name (cross_matched_property for cross-name matches),
+    #     normalized and de-duplicated per (item, gold-property). ---
+    covered_index: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for row in eval_results:
+        if not row.get("is_correct"):
+            continue
+        iid = row.get("item_id", "")
+        if row.get("match_method") == "cross_name_rule" and row.get("cross_matched_property"):
+            gold_pname = row["cross_matched_property"]
+        else:
+            gold_pname = row.get("property_name", "")
+        key = (iid, _norm_name(gold_pname))
+        for mbv in _get_matched_bench_values(row):
+            covered_index[key].add(mbv)
+
+    # --- Recall side: iterate gold, attribute to the gold property name ---
     if bench_scope_ids is not None:
         scope_iids = bench_scope_ids
     else:
         scope_iids = {row["item_id"] for row in eval_results}
+
     for iid in scope_iids:
         bdata = bench.get(iid)
         if not bdata:
             continue
-        if group_by == "cate1_name":
-            group_key = bdata.get("cate1_name", "unknown")
-        elif group_by == "cate_name":
-            group_key = bdata.get("cate_name", "unknown")
-        elif group_by == "property_name":
-            for pname, values in bdata["properties"].items():
-                g = groups[pname]
-                g["total_bench"] = g.get("total_bench", 0) + len(values)
-            continue
-        else:
-            group_key = "overall"
-
-        if group_by != "property_name":
-            total_attrs = sum(len(v) for v in bdata["properties"].values())
-            groups[group_key]["total_bench"] = groups[group_key].get("total_bench", 0) + total_attrs
-
-    for group_key, g in groups.items():
-        total_recalled = 0
-        for (iid, pname), matched_set in g["matched_bench_values"].items():
-            bdata = bench.get(iid)
-            if bdata and pname in bdata["properties"]:
-                bench_vals = set(bdata["properties"][pname])
-                total_recalled += len(matched_set & bench_vals)
+        for pname_gold, values in bdata["properties"].items():
+            if group_by == "cate1_name":
+                group_key = bdata.get("cate1_name", "unknown")
+            elif group_by == "cate_name":
+                group_key = bdata.get("cate_name", "unknown")
+            elif group_by == "property_name":
+                group_key = pname_gold
             else:
-                total_recalled += len(matched_set)
-        g["recalled"] = total_recalled
+                group_key = "overall"
+            gold_set = set(values)
+            covered = covered_index.get((iid, _norm_name(pname_gold)), set())
+            g = groups[group_key]
+            g["total_bench"] += len(gold_set)
+            g["recalled"] += len(gold_set & covered)
 
     results: dict[str, dict] = {}
     for group_key, g in sorted(groups.items()):
@@ -185,8 +191,6 @@ def compute_error_breakdown(eval_results: list[dict]) -> dict[str, int]:
         method = row.get("match_method", "")
         if method in ("no_bench", "no_schema"):
             errors["extra_property"] += 1
-        elif method == "cross_name_llm":
-            errors["name_mismatch"] += 1
         else:
             errors["value_mismatch"] += 1
     return dict(errors)

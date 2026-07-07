@@ -76,6 +76,21 @@ def _is_subsequence(short_value: str, long_value: str) -> bool:
     return cursor == len(short_value)
 
 
+_MIN_FUZZY_LEN = 3
+
+
+def _fuzzy_gate(norm_a: str, norm_b: str) -> bool:
+    """Gate for containment/subsequence matching:
+    require the shorter normalized string to be >= _MIN_FUZZY_LEN chars,
+    and reject pure-digit values (numbers must match exactly).
+    """
+    if min(len(norm_a), len(norm_b)) < _MIN_FUZZY_LEN:
+        return False
+    if norm_a.isdigit() or norm_b.isdigit():
+        return False
+    return True
+
+
 def rule_match_all(predicted_value: str, bench_values: list[str]) -> list[str]:
     """Return ALL matching bench values (exact first, then containment/subsequence)."""
     norm_pred = _normalize_match_value(predicted_value)
@@ -96,7 +111,7 @@ def rule_match_all(predicted_value: str, bench_values: list[str]) -> list[str]:
         norm_bv = _normalize_match_value(bv)
         if not norm_bv:
             continue
-        if (
+        if _fuzzy_gate(norm_pred, norm_bv) and (
             norm_bv in norm_pred
             or norm_pred in norm_bv
             or _is_subsequence(norm_bv, norm_pred)
@@ -132,13 +147,44 @@ for _i, _group in enumerate(_EQUIV_GROUPS):
     for _name in _group:
         _EQUIV_LOOKUP[_normalize_match_value(_name)] = _i
 
+# Spec/model names act as wildcards: equivalent to any other property name.
+_WILDCARD_NORMS: set[str] = {_normalize_match_value(_n) for _n in _EQUIV_GROUPS[0]}
+
+# Non-parameter attributes that spec/model must NOT wildcard-match: they are not
+# a facet of a "model" (origin, brand, date, certification, maker, usage...).
+_WILDCARD_EXCLUDE_NAMES: set[str] = {
+    "产地", "原产国/地区", "原产地",
+    "品牌", "商标", "牌子",
+    "生产日期", "出厂日期", "日期",
+    "保质期", "有效期",
+    "认证", "行业认证",
+    "厂家", "生产厂家", "制造商", "生产商", "厂商", "供应商",
+    "用途范围", "下游应用", "产品下游应用", "主要用途", "场景用途",
+    "适用范围", "用途", "应用领域",
+}
+_WILDCARD_EXCLUDE_NORMS: set[str] = {_normalize_match_value(_n) for _n in _WILDCARD_EXCLUDE_NAMES}
+
 
 def _names_equivalent_by_rule(name_a: str, name_b: str) -> bool:
-    """Rule-based name equivalence: NFKC exact match or same equivalence group."""
+    """Rule-based property-name equivalence (no LLM):
+    NFKC exact match, mutual subsequence, spec/model wildcard, or same equivalence group.
+    """
     norm_a = _normalize_match_value(name_a)
     norm_b = _normalize_match_value(name_b)
+    if not norm_a or not norm_b:
+        return False
     if norm_a == norm_b:
         return True
+    if _fuzzy_gate(norm_a, norm_b) and (
+        _is_subsequence(norm_a, norm_b) or _is_subsequence(norm_b, norm_a)
+    ):
+        return True
+    a_wild = norm_a in _WILDCARD_NORMS
+    b_wild = norm_b in _WILDCARD_NORMS
+    if a_wild or b_wild:
+        other = norm_b if a_wild else norm_a
+        if other not in _WILDCARD_EXCLUDE_NORMS:
+            return True
     group_a = _EQUIV_LOOKUP.get(norm_a)
     group_b = _EQUIV_LOOKUP.get(norm_b)
     if group_a is not None and group_a == group_b:
@@ -152,10 +198,6 @@ def _names_equivalent_by_rule(name_a: str, name_b: str) -> bool:
 
 def make_cache_key(property_name: str, predicted_value: str, bench_values: list[str]) -> str:
     return json.dumps([property_name, predicted_value, sorted(bench_values)], ensure_ascii=False)
-
-
-def make_name_equiv_cache_key(name_a: str, name_b: str, cate_name: str) -> str:
-    return json.dumps(sorted([name_a, name_b]) + [cate_name], ensure_ascii=False)
 
 
 def load_cache(path: str) -> dict[str, dict]:
@@ -188,12 +230,6 @@ def _load_judge_prompts() -> tuple[str, str]:
     with open(user_path, encoding="utf-8") as f:
         user_template = f.read()
     return sys_prompt, user_template
-
-
-def _load_name_equiv_prompt() -> str:
-    path = os.path.join(PROMPT_DIR, "judge_name_equiv_prompt.txt")
-    with open(path, encoding="utf-8") as f:
-        return f.read()
 
 
 def _extract_matched_bench_values(result: dict) -> list[str]:
@@ -251,54 +287,6 @@ async def call_judge(
                 continue
             return {"is_correct": False, "matched_bench_values": [], "reason": f"error: {str(exc)[:200]}", "status": "failed"}
     return {"is_correct": False, "matched_bench_values": [], "reason": "unexpected", "status": "failed"}
-
-
-# ---------------------------------------------------------------------------
-# LLM judge: property name equivalence
-# ---------------------------------------------------------------------------
-
-async def call_name_equiv_judge(
-    client: ModelClient,
-    request_semaphore: asyncio.Semaphore,
-    name_equiv_template: str,
-    name_a: str,
-    name_b: str,
-    matched_value: str,
-    cate1_name: str,
-    cate_name: str,
-    retry: int,
-) -> dict:
-    prompt_text = Template(name_equiv_template).safe_substitute(
-        name_a=name_a,
-        name_b=name_b,
-        matched_value=matched_value,
-        cate1_name=cate1_name,
-        cate_name=cate_name,
-    )
-    messages = [{"role": "user", "content": prompt_text}]
-
-    for attempt in range(retry):
-        try:
-            async with request_semaphore:
-                response_text = await client.chat(messages)
-
-            result = parse_json_response(response_text)
-            if result is not None and "is_equivalent" in result:
-                return {
-                    "is_equivalent": bool(result["is_equivalent"]),
-                    "reason": result.get("reason", ""),
-                    "status": "success",
-                }
-            if attempt < retry - 1:
-                await asyncio.sleep(2 ** attempt)
-                continue
-            return {"is_equivalent": False, "reason": "response_parse_failed", "status": "failed"}
-        except Exception as exc:
-            if attempt < retry - 1:
-                await asyncio.sleep(2 ** attempt)
-                continue
-            return {"is_equivalent": False, "reason": f"error: {str(exc)[:200]}", "status": "failed"}
-    return {"is_equivalent": False, "reason": "unexpected", "status": "failed"}
 
 
 # ---------------------------------------------------------------------------
@@ -379,14 +367,11 @@ def prepare_eval_tasks(input_path: str) -> list[dict]:
 async def run_eval(
     tasks: list[dict],
     cache: dict[str, dict],
-    name_equiv_cache: dict[str, dict],
     output_path: str,
     cache_path: str,
-    name_equiv_cache_path: str,
     client: ModelClient,
     system_prompt: str,
     user_template: str,
-    name_equiv_template: str,
     workers: int,
     request_workers: int,
     retry: int,
@@ -399,7 +384,7 @@ async def run_eval(
     write_lock = asyncio.Lock()
     cache_lock = asyncio.Lock()
 
-    stats = {"rule": 0, "cache": 0, "cross_name_rule": 0, "cross_name_llm": 0,
+    stats = {"rule": 0, "cache": 0, "cross_name_rule": 0,
              "llm": 0, "no_bench": 0, "no_schema": 0, "failed": 0}
 
     async def process_one(task: dict) -> None:
@@ -408,6 +393,17 @@ async def run_eval(
         bench_values = task["bench_values"]
         all_bench = task["all_bench_by_prop"]
         pname_norm = _normalize_match_value(pname)
+
+        # --- Step 0: predicted property not in schema -> error ---
+        if not task.get("in_schema", True):
+            result = {**task, "match_method": "no_schema", "is_correct": False,
+                      "matched_bench_values": [], "reason": "predicted property not in cpv_schema"}
+            del result["all_bench_by_prop"]
+            stats["no_schema"] += 1
+            async with write_lock:
+                with open(output_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
+            return
 
         # --- Step 1: same-name rule match ---
         if bench_values:
@@ -445,123 +441,86 @@ async def run_eval(
                         f.write(json.dumps(result, ensure_ascii=False) + "\n")
                 return
 
-        # --- Step 3: cross-name value rule match ---
-        async with semaphore:
-            cross_name_result = None
-            for other_pn_orig, other_values in all_bench.items():
-                other_pn_norm = _normalize_match_value(other_pn_orig)
-                if other_pn_norm == pname_norm:
-                    continue
-                cross_rule = rule_match_all(pvalue, other_values)
-                if not cross_rule:
-                    continue
+        # --- Step 3: cross-name value rule match (rule-based name equivalence only) ---
+        cross_name_result = None
+        for other_pn_orig, other_values in all_bench.items():
+            other_pn_norm = _normalize_match_value(other_pn_orig)
+            if other_pn_norm == pname_norm:
+                continue
+            if not _names_equivalent_by_rule(pname, other_pn_orig):
+                continue
+            cross_rule = rule_match_all(pvalue, other_values)
+            if cross_rule:
+                cross_name_result = (cross_rule, other_pn_orig)
+                break
 
-                # 3a: name equivalence by rule (NFKC exact match only)
-                if _names_equivalent_by_rule(pname, other_pn_orig):
-                    cross_name_result = ("cross_name_rule", cross_rule, other_pn_orig, "name rule match")
-                    break
+        if cross_name_result:
+            matched, other_pn = cross_name_result
+            result = {
+                **task,
+                "match_method": "cross_name_rule",
+                "is_correct": True,
+                "matched_bench_values": matched,
+                "cross_matched_property": other_pn,
+                "reason": "name rule match",
+            }
+            del result["all_bench_by_prop"]
+            stats["cross_name_rule"] += 1
+            async with write_lock:
+                with open(output_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
+            return
 
-                # 3b: name equivalence by LLM (with cache)
-                ne_cache_key = make_name_equiv_cache_key(pname, other_pn_orig, task["cate_name"])
-                async with cache_lock:
-                    ne_cached = name_equiv_cache.get(ne_cache_key)
-                if ne_cached is not None:
-                    if ne_cached.get("is_equivalent"):
-                        cross_name_result = ("cross_name_llm", cross_rule, other_pn_orig, ne_cached.get("reason", "cached"))
-                        break
-                    continue
-
-                ne_result = await call_name_equiv_judge(
-                    client, request_semaphore, name_equiv_template,
-                    pname, other_pn_orig, pvalue,
-                    task["cate1_name"], task["cate_name"], retry,
-                )
-                if ne_result["status"] == "success":
-                    ne_entry = {
-                        "key": sorted([pname, other_pn_orig]) + [task["cate_name"]],
-                        "is_equivalent": ne_result["is_equivalent"],
-                        "reason": ne_result["reason"],
-                    }
-                    async with cache_lock:
-                        name_equiv_cache[ne_cache_key] = ne_entry
-                    async with write_lock:
-                        with open(name_equiv_cache_path, "a", encoding="utf-8") as f:
-                            f.write(json.dumps(ne_entry, ensure_ascii=False) + "\n")
-
-                    if ne_result["is_equivalent"]:
-                        cross_name_result = ("cross_name_llm", cross_rule, other_pn_orig, ne_result["reason"])
-                        break
-
-            if cross_name_result:
-                method, matched, other_pn, reason = cross_name_result
-                result = {
-                    **task,
-                    "match_method": method,
-                    "is_correct": True,
-                    "matched_bench_values": matched,
-                    "cross_matched_property": other_pn,
-                    "reason": reason,
-                }
-                del result["all_bench_by_prop"]
-                stats[method] += 1
-                async with write_lock:
-                    with open(output_path, "a", encoding="utf-8") as f:
-                        f.write(json.dumps(result, ensure_ascii=False) + "\n")
-                return
-
-            # --- Step 4: same-name LLM value judge ---
-            if bench_values:
+        # --- Step 4: same-name LLM value judge ---
+        if bench_values:
+            async with semaphore:
                 llm_result = await call_judge(
                     client, request_semaphore, system_prompt, user_template,
                     pname, pvalue, bench_values, retry,
                 )
 
-                if llm_result["status"] == "success":
-                    cache_entry = {
-                        "key": [pname, pvalue, sorted(bench_values)],
-                        "is_correct": llm_result["is_correct"],
-                        "matched_bench_values": llm_result["matched_bench_values"],
-                        "reason": llm_result["reason"],
-                    }
-                    cache_key = make_cache_key(pname, pvalue, bench_values)
-                    async with cache_lock:
-                        cache[cache_key] = cache_entry
-                    async with write_lock:
-                        with open(cache_path, "a", encoding="utf-8") as f:
-                            f.write(json.dumps(cache_entry, ensure_ascii=False) + "\n")
-
-                    result = {
-                        **task,
-                        "match_method": "llm",
-                        "is_correct": llm_result["is_correct"],
-                        "matched_bench_values": llm_result["matched_bench_values"],
-                        "reason": llm_result["reason"],
-                    }
-                    del result["all_bench_by_prop"]
-                    stats["llm"] += 1
-                else:
-                    result = {**task, "match_method": "failed", "is_correct": False,
-                              "matched_bench_values": [], "reason": llm_result["reason"]}
-                    del result["all_bench_by_prop"]
-                    stats["failed"] += 1
-
+            if llm_result["status"] == "success":
+                cache_entry = {
+                    "key": [pname, pvalue, sorted(bench_values)],
+                    "is_correct": llm_result["is_correct"],
+                    "matched_bench_values": llm_result["matched_bench_values"],
+                    "reason": llm_result["reason"],
+                }
+                cache_key = make_cache_key(pname, pvalue, bench_values)
+                async with cache_lock:
+                    cache[cache_key] = cache_entry
                 async with write_lock:
-                    with open(output_path, "a", encoding="utf-8") as f:
-                        f.write(json.dumps(result, ensure_ascii=False) + "\n")
-                return
+                    with open(cache_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(cache_entry, ensure_ascii=False) + "\n")
 
-            # --- Step 5: unresolved ---
-            if not task.get("in_schema", True):
-                method, reason = "no_schema", "predicted property not in cpv_schema"
+                result = {
+                    **task,
+                    "match_method": "llm",
+                    "is_correct": llm_result["is_correct"],
+                    "matched_bench_values": llm_result["matched_bench_values"],
+                    "reason": llm_result["reason"],
+                }
+                del result["all_bench_by_prop"]
+                stats["llm"] += 1
             else:
-                method, reason = "no_bench", "no benchmark values for this property"
-            result = {**task, "match_method": method, "is_correct": False,
-                      "matched_bench_values": [], "reason": reason}
-            del result["all_bench_by_prop"]
-            stats[method] += 1
+                result = {**task, "match_method": "failed", "is_correct": False,
+                          "matched_bench_values": [], "reason": llm_result["reason"]}
+                del result["all_bench_by_prop"]
+                stats["failed"] += 1
+
             async with write_lock:
                 with open(output_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(result, ensure_ascii=False) + "\n")
+            return
+
+        # --- Step 5: unresolved ---
+        result = {**task, "match_method": "no_bench", "is_correct": False,
+                  "matched_bench_values": [], "reason": "no benchmark values for this property"}
+        del result["all_bench_by_prop"]
+        stats["no_bench"] += 1
+        async with write_lock:
+            with open(output_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(result, ensure_ascii=False) + "\n")
 
     aws = [asyncio.create_task(process_one(t)) for t in tasks]
     for fut in tqdm(asyncio.as_completed(aws), total=len(aws), desc="eval"):
@@ -595,11 +554,9 @@ def main() -> None:
 
     cache_dir = args.cache_dir or os.path.dirname(os.path.abspath(args.output))
     cache_path = os.path.join(cache_dir, "eval_cache.jsonl")
-    name_equiv_cache_path = os.path.join(cache_dir, "name_equiv_cache.jsonl")
 
     cache = load_cache(cache_path)
-    name_equiv_cache = load_cache(name_equiv_cache_path)
-    print(f"[cache] {len(cache)} value entries, {len(name_equiv_cache)} name-equiv entries")
+    print(f"[cache] {len(cache)} value entries")
 
     tasks = prepare_eval_tasks(args.input)
     print(f"[tasks] {len(tasks)} attribute evaluations")
@@ -655,7 +612,6 @@ def main() -> None:
             return
 
     system_prompt, user_template = _load_judge_prompts()
-    name_equiv_template = _load_name_equiv_prompt()
     client = create_client(
         provider=args.provider,
         model=args.model,
@@ -668,14 +624,11 @@ def main() -> None:
     stats = asyncio.run(run_eval(
         tasks=tasks,
         cache=cache,
-        name_equiv_cache=name_equiv_cache,
         output_path=args.output,
         cache_path=cache_path,
-        name_equiv_cache_path=name_equiv_cache_path,
         client=client,
         system_prompt=system_prompt,
         user_template=user_template,
-        name_equiv_template=name_equiv_template,
         workers=args.workers,
         request_workers=args.request_workers,
         retry=args.retry,
