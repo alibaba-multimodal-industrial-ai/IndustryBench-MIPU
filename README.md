@@ -12,11 +12,9 @@
 
 Industrial product specifications are scattered across multiple heterogeneous images — specification tables, nameplates, technical drawings. **IndustryBench-MIPU** tests whether MLLMs can reliably recover them through four challenges: text recognition, visual reasoning, domain knowledge, and cross-image evidence integration.
 
-> 🚧 **Work in Progress** — We are still actively updating the benchmark to further improve its quality. A new version is expected to be released by **late June 2026**.
-
 ## Key Features
 
-- **4,559 products** across 18 industrial categories with 182K+ image-level annotations
+- **4,481 products** across 18 top-level categories (2,301 leaf categories) with 95K+ product-level annotations
 - **Two evaluation granularities**: single-image and multi-image (cross-image reasoning)
 - **Plug-and-play evaluation code**: OpenAI-compatible & Anthropic APIs supported out of the box
 - **Cascaded judge**: rule-based normalization + LLM semantic matching for robust evaluation
@@ -38,9 +36,9 @@ The dominant pattern: **high precision (86–94%) but low recall** — the best 
 
 <div align="center">
 
-| Products | Valid Images | Categories | Property Names | Image-level Annotations | Product-level Annotations |
-|:--------:|:-----------:|:----------:|:--------------:|:-----------------------:|:-------------------------:|
-| 4,559 | 27,652 | 18 | 3,564 | 182,527 | 103,703 |
+| Products | Images | Top-level Categories | Leaf Categories | Property Names | Product-level Annotations |
+|:--------:|:------:|:--------------------:|:---------------:|:--------------:|:-------------------------:|
+| 4,481 | 26,310 | 18 | 2,301 | 4,554 | 95,024 |
 
 </div>
 
@@ -48,8 +46,8 @@ Two evaluation settings:
 
 | Setting | File | Granularity | Description |
 |---------|------|-------------|-------------|
-| Single-image | `single_image_level.jsonl` | Per image | Extract attributes visible in one image |
-| Multi-image | `multi_image_level.jsonl` | Per product | Extract all attributes from a product's full image set |
+| Single-image | `single_image_level.jsonl` | Per image | Extract attributes visible in one image (6,000-image stratified subset, 44,111 property-value pairs) |
+| Multi-image | `multi_image_level.jsonl` | Per product | Extract all attributes from a product's full image set (4,481 products) |
 
 ---
 
@@ -175,10 +173,12 @@ Options: `--by cate1_name` (top-level category), `--by cate_name` (leaf category
   "item_id": "560324848370",
   "title": "日亚铝基板 NICHIA ...",
   "cate1_name": "电子元器件",
+  "cate_name": "铝基板",
   "main_entity": "NICHIA铝基板",
-  "cpv_schema": "颜色,品牌,型号,...",
-  "images": [{"image_path": "images/560324848370_main_0.jpg", ...}],
-  "cpv_results": [{"property_name": "颜色", "property_value": "白色"}, ...]
+  "cpv_schema": ["颜色", "品牌", "型号", "..."],
+  "image_count": 7,
+  "images": [{"record_id": "560324848370#main", "image_source": "main_image", "image_index": 0, "image_path": "images/560324848370_main.jpg"}],
+  "cpv_results": {"颜色": ["白色"], "品牌": ["NICHIA"], "...": ["..."]}
 }
 ```
 
@@ -188,17 +188,19 @@ Options: `--by cate1_name` (top-level category), `--by cate_name` (leaf category
 {
   "record_id": "589158697373#detail_3",
   "image_path": "images/589158697373_detail_3.jpg",
-  "cpv_schema": "含量,纯度,...",
-  "cpv_results": [{"property_name": "含量", "property_value": "98%"}]
+  "cpv_schema": ["含量", "纯度", "..."],
+  "cpv_results": {"含量": ["98%"]}
 }
 ```
+
+Both use `cpv_schema` as a list of valid property names and `cpv_results` as a dict mapping `property_name` → list of property values.
 
 ---
 
 ## Evaluation Pipeline
 
-- **Extract**: Send product images + metadata to an MLLM, obtain `{property_name, property_value}` pairs
-- **Eval**: Cascaded matching — rule-based normalization first (unit conversion, synonym mapping), LLM semantic judge for ambiguous cases
+- **Extract**: Send product images + metadata to an MLLM, obtain a `property_name → [values]` mapping
+- **Eval**: Cascaded matching — same-name rule match → same-name cache → cross-name value rule match → same-name LLM semantic judge, with an LLM name-equivalence judge for synonymous property names
 - **Aggregate**: Precision = correct / predicted, Recall = matched / benchmark, F1 = harmonic mean
 
 ### Supported Providers
@@ -237,10 +239,11 @@ The benchmark is built through a semi-automated pipeline:
 │   ├── model_client.py           # Unified API client (OpenAI / Anthropic)
 │   ├── utils.py                  # JSON parsing utilities
 │   ├── prompts/                  # Prompt templates
-│   │   ├── extraction_prompt.txt
-│   │   ├── extraction_prompt_single.txt
-│   │   ├── judge_system_prompt.txt
-│   │   └── judge_user_prompt.txt
+│   │   ├── extraction_prompt_v3_multi.txt   # Multi-image extraction
+│   │   ├── extraction_prompt_v3.txt         # Single-image extraction
+│   │   ├── judge_system_prompt.txt          # Value semantic judge (system)
+│   │   ├── judge_user_prompt.txt            # Value semantic judge (user)
+│   │   └── judge_name_equiv_prompt.txt      # Property-name equivalence judge
 │   └── requirements.txt
 ├── data/                         # Dataset (download from HuggingFace)
 │   ├── multi_image_level.jsonl

@@ -13,7 +13,7 @@ from anthropic import AsyncAnthropic
 
 
 DEFAULT_OPENAI_MAX_TOKENS = 8192
-DEFAULT_ANTHROPIC_MAX_TOKENS = 16384
+DEFAULT_ANTHROPIC_MAX_TOKENS = 8192
 
 
 def _encode_image(path: Path) -> tuple[str, str]:
@@ -35,6 +35,7 @@ class ModelClient(ABC):
         messages: list[dict[str, Any]],
         images: list[Path] | None = None,
     ) -> str:
+        """Send a chat request and return the text response."""
         ...
 
     async def chat_with_finish(
@@ -42,18 +43,13 @@ class ModelClient(ABC):
         messages: list[dict[str, Any]],
         images: list[Path] | None = None,
     ) -> tuple[str, str]:
-        """Like chat() but also returns the finish_reason.
-
-        Returns:
-            (text, finish_reason). finish_reason is "stop" for normal completion,
-            "length" when the output hit max_tokens (truncated), or "unknown".
-        """
+        """Like chat() but also returns the finish_reason."""
         text = await self.chat(messages, images=images)
         return text, "unknown"
 
 
 class OpenAIClient(ModelClient):
-    """Client for OpenAI-compatible APIs (also covers Qwen/DashScope, Gemini, vLLM, etc.)."""
+    """Client for OpenAI-compatible APIs (also covers Qwen/DashScope, vLLM, etc.)."""
 
     def __init__(
         self,

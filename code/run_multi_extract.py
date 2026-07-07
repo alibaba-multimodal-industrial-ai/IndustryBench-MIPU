@@ -108,9 +108,16 @@ def _get_sorted_image_paths(item: dict) -> list[str]:
 
 
 def _load_prompt_template() -> str:
-    path = os.path.join(PROMPT_DIR, "extraction_prompt.txt")
+    path = os.path.join(PROMPT_DIR, "extraction_prompt_v3_multi.txt")
     with open(path, encoding="utf-8") as f:
         return f.read()
+
+
+def _format_schema(schema: Any) -> str:
+    """Convert cpv_schema (list or comma-string) to display string."""
+    if isinstance(schema, list):
+        return "、".join(s.strip() for s in schema if isinstance(s, str) and s.strip())
+    return _safe_str(schema)
 
 
 def _build_prompt(template: str, item: dict, image_count: int) -> str:
@@ -119,7 +126,7 @@ def _build_prompt(template: str, item: dict, image_count: int) -> str:
         main_entity=_safe_str(item.get("main_entity")).strip(),
         cate1_name=_safe_str(item.get("cate1_name")),
         cate_name=_safe_str(item.get("cate_name")),
-        cpv_schema=_safe_str(item.get("cpv_schema")),
+        cpv_schema=_format_schema(item.get("cpv_schema")),
     )
 
 
@@ -161,13 +168,22 @@ async def _call_model(
                 response_text = await client.chat(messages, images=image_paths)
 
             parsed = parse_json_response(response_text)
-            if parsed is not None and "cpv_results" in parsed:
-                return {
-                    "status": "success",
-                    "cpv_results": _clean_cpv_results(parsed["cpv_results"]),
-                    "error_type": None,
-                    "attempts": attempts,
-                }
+            if parsed is not None:
+                if "cpv_results" in parsed:
+                    cpv = _clean_cpv_results(parsed["cpv_results"])
+                else:
+                    cpv = [
+                        {"property_name": str(k).strip(), "property_value": v}
+                        for k, v in parsed.items()
+                        if str(k).strip() and v not in (None, "", [])
+                    ]
+                if cpv:
+                    return {
+                        "status": "success",
+                        "cpv_results": cpv,
+                        "error_type": None,
+                        "attempts": attempts,
+                    }
 
             if attempt < retry - 1:
                 await asyncio.sleep(2 ** attempt)
@@ -281,12 +297,14 @@ def main() -> None:
     parser.add_argument("--api-key", default=None, help="API key (or set API_KEY env var)")
     parser.add_argument("--api-base", default=None, help="API base URL (or set API_BASE_URL env var)")
     parser.add_argument("--enable-thinking", action="store_true", help="Enable thinking/reasoning mode")
+    parser.add_argument("--max-tokens", type=int, default=None,
+                        help="Maximum generated tokens (default: 8192)")
     parser.add_argument("--workers", type=int, default=10, help="Item-level concurrency (default: 10)")
     parser.add_argument("--request-workers", type=int, default=30, help="Global HTTP concurrency (default: 30)")
     parser.add_argument("--retry", type=int, default=3, help="Retries per request (default: 3)")
     parser.add_argument("--limit", type=int, default=None, help="Process only the first N items")
-    parser.add_argument("--max-images", type=int, default=60,
-                        help="Skip items with more than this many images (default: 60)")
+    parser.add_argument("--max-images", type=int, default=None,
+                        help="Skip items with more than this many images (default: no limit)")
     parser.add_argument("--shuffle", action="store_true", help="Randomize item order")
     parser.add_argument("--no-resume", action="store_true", help="Overwrite output file and start fresh")
     parser.add_argument("--retry-failed", action="store_true", help="Re-run items with status=failed")
@@ -347,6 +365,7 @@ def main() -> None:
         api_key=args.api_key,
         base_url=args.api_base,
         enable_thinking=args.enable_thinking,
+        max_tokens=args.max_tokens,
     )
 
     results = asyncio.run(_run(

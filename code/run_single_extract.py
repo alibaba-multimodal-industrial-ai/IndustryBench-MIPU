@@ -89,9 +89,16 @@ def _strip_failed_rows(output_path: str) -> int:
 
 
 def _load_prompt_template() -> str:
-    path = os.path.join(PROMPT_DIR, "extraction_prompt_single.txt")
+    path = os.path.join(PROMPT_DIR, "extraction_prompt_v3.txt")
     with open(path, encoding="utf-8") as f:
         return f.read()
+
+
+def _format_schema(schema: Any) -> str:
+    """Convert cpv_schema (list or comma-string) to display string."""
+    if isinstance(schema, list):
+        return "、".join(s.strip() for s in schema if isinstance(s, str) and s.strip())
+    return _safe_str(schema)
 
 
 def _build_prompt(template: str, record: dict) -> str:
@@ -101,7 +108,7 @@ def _build_prompt(template: str, record: dict) -> str:
         main_entity=_safe_str(record.get("main_entity")).strip(),
         cate1_name=_safe_str(record.get("cate1_name")),
         cate_name=_safe_str(record.get("cate_name")),
-        cpv_schema=_safe_str(record.get("cpv_schema")),
+        cpv_schema=_format_schema(record.get("cpv_schema")),
     )
 
 
@@ -143,14 +150,24 @@ async def _call_model(
                 response_text, finish_reason = await client.chat_with_finish(messages, images=[image_path])
 
             parsed = parse_json_response(response_text)
-            if parsed is not None and "cpv_results" in parsed:
-                return {
-                    "status": "success",
-                    "cpv_results": _clean_cpv_results(parsed["cpv_results"]),
-                    "error_type": None,
-                    "attempts": attempts,
-                    "finish_reason": finish_reason,
-                }
+            if parsed is not None:
+                if "cpv_results" in parsed:
+                    cpv = _clean_cpv_results(parsed["cpv_results"])
+                else:
+                    cpv = [
+                        {"property_name": str(k).strip(), "property_value": v}
+                        for k, v in parsed.items()
+                        if str(k).strip() and v not in (None, "", [])
+                    ]
+                if cpv:
+                    return {
+                        "status": "success",
+                        "cpv_results": cpv,
+                        "error_type": None,
+                        "attempts": attempts,
+                        "finish_reason": finish_reason,
+                        "raw_output": (response_text or "")[:8000],
+                    }
 
             if attempt < retry - 1:
                 await asyncio.sleep(2 ** attempt)
@@ -162,6 +179,7 @@ async def _call_model(
                 "error_type": err_type,
                 "attempts": attempts,
                 "finish_reason": finish_reason,
+                "raw_output": (response_text or "")[:8000],
             }
         except Exception as exc:
             if attempt < retry - 1:
@@ -173,6 +191,7 @@ async def _call_model(
                 "error_type": "request_failed",
                 "attempts": attempts,
                 "finish_reason": "error",
+                "raw_output": str(exc)[:500],
             }
 
     return {"status": "failed", "cpv_results": [], "error_type": "unexpected_exit", "attempts": attempts}
@@ -217,6 +236,8 @@ async def _process_one(
             "attempts": result.get("attempts", 0),
             "elapsed_ms": int((time.time() - started_at) * 1000),
         }
+        if result.get("raw_output"):
+            out["raw_output"] = result["raw_output"]
 
         async with write_lock:
             with open(output_path, "a", encoding="utf-8") as f:
@@ -273,6 +294,8 @@ def main() -> None:
     parser.add_argument("--retry", type=int, default=3)
     parser.add_argument("--limit", type=int, default=None, help="Process only first N records")
     parser.add_argument("--enable-thinking", action="store_true")
+    parser.add_argument("--prompt-file", default=None,
+                        help="Custom prompt template file (default: prompts/extraction_prompt_v3.txt)")
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--shuffle", action="store_true")
@@ -319,7 +342,14 @@ def main() -> None:
         print("Nothing to do.")
         return
 
-    prompt_template = _load_prompt_template()
+    if args.prompt_file:
+        with open(args.prompt_file, encoding="utf-8") as f:
+            prompt_template = f.read()
+        print(f"[prompt] custom: {args.prompt_file}")
+    else:
+        prompt_template = _load_prompt_template()
+        print(f"[prompt] default: extraction_prompt_v3.txt")
+
     client = create_client(
         provider=args.provider,
         model=args.model,

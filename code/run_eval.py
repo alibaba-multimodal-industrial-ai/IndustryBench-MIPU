@@ -1,10 +1,8 @@
 """
 Attribute-level evaluation: semantic matching of predicted vs. benchmark values.
 
-Two-stage pipeline: rule-based matching -> LLM semantic judge.
-
-v2: rule_match_all returns list[str] (all matching bench values).
-    Output uses matched_bench_values (list) instead of matched_bench_value (str).
+Pipeline: same-name rule match -> same-name cache -> cross-name value rule match
+           -> same-name LLM judge.
 
 Usage:
     python run_eval.py \
@@ -34,7 +32,7 @@ PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 
 
 # ---------------------------------------------------------------------------
-# Rule-based matching (collect ALL matching bench values)
+# Normalization helpers
 # ---------------------------------------------------------------------------
 
 _NUMBER_PATTERN = re.compile(r"\d+\.\d+")
@@ -54,6 +52,19 @@ def _normalize_match_value(value: str) -> str:
     value = re.sub(r"[^\w]", "", value, flags=re.UNICODE)
     return value
 
+
+def _normalize_schema(schema: Any) -> set[str]:
+    """Normalize cpv_schema (list or comma-string) to a set of property names."""
+    if isinstance(schema, list):
+        return {s.strip() for s in schema if isinstance(s, str) and s.strip()}
+    if isinstance(schema, str) and schema.strip():
+        return {s.strip() for s in schema.split(",") if s.strip()}
+    return set()
+
+
+# ---------------------------------------------------------------------------
+# Rule-based matching (collect ALL matching bench values)
+# ---------------------------------------------------------------------------
 
 def _is_subsequence(short_value: str, long_value: str) -> bool:
     if len(short_value) > len(long_value):
@@ -97,11 +108,54 @@ def rule_match_all(predicted_value: str, bench_values: list[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Cross-name: property name equivalence
+# ---------------------------------------------------------------------------
+
+_EQUIV_GROUPS: list[set[str]] = [
+    {"规格型号", "规格", "型号", "产品规格", "产品型号"},
+    {"产地", "原产国/地区"},
+    {"用途范围", "下游应用", "主要用途", "产品下游应用", "场景用途", "适用范围", "用途", "应用领域"},
+    {"尺寸", "外形尺寸", "产品尺寸"},
+    {"材质", "产品材质", "塑料品种"},
+    {"类型", "产品类型", "种类"},
+    {"颜色", "产品颜色"},
+    {"功率", "额定功率"},
+    {"认证", "行业认证"},
+    {"订货号", "货号"},
+    {"电源电压", "额定电压范围"},
+    {"最大切换电压", "最大负载电压"},
+    {"工艺", "表面处理"},
+]
+
+_EQUIV_LOOKUP: dict[str, int] = {}
+for _i, _group in enumerate(_EQUIV_GROUPS):
+    for _name in _group:
+        _EQUIV_LOOKUP[_normalize_match_value(_name)] = _i
+
+
+def _names_equivalent_by_rule(name_a: str, name_b: str) -> bool:
+    """Rule-based name equivalence: NFKC exact match or same equivalence group."""
+    norm_a = _normalize_match_value(name_a)
+    norm_b = _normalize_match_value(name_b)
+    if norm_a == norm_b:
+        return True
+    group_a = _EQUIV_LOOKUP.get(norm_a)
+    group_b = _EQUIV_LOOKUP.get(norm_b)
+    if group_a is not None and group_a == group_b:
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Cache
 # ---------------------------------------------------------------------------
 
 def make_cache_key(property_name: str, predicted_value: str, bench_values: list[str]) -> str:
     return json.dumps([property_name, predicted_value, sorted(bench_values)], ensure_ascii=False)
+
+
+def make_name_equiv_cache_key(name_a: str, name_b: str, cate_name: str) -> str:
+    return json.dumps(sorted([name_a, name_b]) + [cate_name], ensure_ascii=False)
 
 
 def load_cache(path: str) -> dict[str, dict]:
@@ -123,7 +177,7 @@ def load_cache(path: str) -> dict[str, dict]:
 
 
 # ---------------------------------------------------------------------------
-# LLM judge
+# LLM judge: value semantic matching
 # ---------------------------------------------------------------------------
 
 def _load_judge_prompts() -> tuple[str, str]:
@@ -134,6 +188,12 @@ def _load_judge_prompts() -> tuple[str, str]:
     with open(user_path, encoding="utf-8") as f:
         user_template = f.read()
     return sys_prompt, user_template
+
+
+def _load_name_equiv_prompt() -> str:
+    path = os.path.join(PROMPT_DIR, "judge_name_equiv_prompt.txt")
+    with open(path, encoding="utf-8") as f:
+        return f.read()
 
 
 def _extract_matched_bench_values(result: dict) -> list[str]:
@@ -194,6 +254,54 @@ async def call_judge(
 
 
 # ---------------------------------------------------------------------------
+# LLM judge: property name equivalence
+# ---------------------------------------------------------------------------
+
+async def call_name_equiv_judge(
+    client: ModelClient,
+    request_semaphore: asyncio.Semaphore,
+    name_equiv_template: str,
+    name_a: str,
+    name_b: str,
+    matched_value: str,
+    cate1_name: str,
+    cate_name: str,
+    retry: int,
+) -> dict:
+    prompt_text = Template(name_equiv_template).safe_substitute(
+        name_a=name_a,
+        name_b=name_b,
+        matched_value=matched_value,
+        cate1_name=cate1_name,
+        cate_name=cate_name,
+    )
+    messages = [{"role": "user", "content": prompt_text}]
+
+    for attempt in range(retry):
+        try:
+            async with request_semaphore:
+                response_text = await client.chat(messages)
+
+            result = parse_json_response(response_text)
+            if result is not None and "is_equivalent" in result:
+                return {
+                    "is_equivalent": bool(result["is_equivalent"]),
+                    "reason": result.get("reason", ""),
+                    "status": "success",
+                }
+            if attempt < retry - 1:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            return {"is_equivalent": False, "reason": "response_parse_failed", "status": "failed"}
+        except Exception as exc:
+            if attempt < retry - 1:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            return {"is_equivalent": False, "reason": f"error: {str(exc)[:200]}", "status": "failed"}
+    return {"is_equivalent": False, "reason": "unexpected", "status": "failed"}
+
+
+# ---------------------------------------------------------------------------
 # Main evaluation logic
 # ---------------------------------------------------------------------------
 
@@ -211,15 +319,28 @@ def prepare_eval_tasks(input_path: str) -> list[dict]:
             cate1 = row.get("cate1_name", "")
             cate_name = row.get("cate_name", "")
 
-            schema_str = row.get("cpv_schema", "")
-            schema_names = {s.strip() for s in schema_str.split(",") if s.strip()} if schema_str else set()
+            schema_names = _normalize_schema(row.get("cpv_schema", ""))
+            schema_names_norm = {_normalize_match_value(s) for s in schema_names}
 
             bench_by_prop: dict[str, list[str]] = {}
-            for cpv in (row.get("benchmark_cpv_results") or []):
-                pn = (cpv.get("property_name") or "").strip()
-                pv = cpv.get("property_value")
-                if pn and pv not in (None, "", []):
-                    bench_by_prop.setdefault(pn, []).append(str(pv).strip())
+            bench_raw = row.get("benchmark_cpv_results") or {}
+            if isinstance(bench_raw, dict):
+                for pn, pv_list in bench_raw.items():
+                    pn = pn.strip()
+                    if not pn:
+                        continue
+                    if isinstance(pv_list, list):
+                        bench_by_prop[pn] = [str(v).strip() for v in pv_list if v not in (None, "", [])]
+                    elif pv_list not in (None, "", []):
+                        bench_by_prop[pn] = [str(pv_list).strip()]
+            elif isinstance(bench_raw, list):
+                for cpv in bench_raw:
+                    if not isinstance(cpv, dict):
+                        continue
+                    pn = (cpv.get("property_name") or "").strip()
+                    pv = cpv.get("property_value")
+                    if pn and pv not in (None, "", []):
+                        bench_by_prop.setdefault(pn, []).append(str(pv).strip())
 
             for cpv in (row.get("prediction_cpv_results") or []):
                 pn = (cpv.get("property_name") or "").strip()
@@ -227,27 +348,45 @@ def prepare_eval_tasks(input_path: str) -> list[dict]:
                 if not pn or pv in (None, "", []):
                     continue
                 pv_str = str(pv).strip()
+                pn_norm = _normalize_match_value(pn)
                 bench_values = bench_by_prop.get(pn, [])
-                tasks.append({
-                    "item_id": item_id,
-                    "cate1_name": cate1,
-                    "cate_name": cate_name,
-                    "property_name": pn,
-                    "predicted_value": pv_str,
-                    "bench_values": bench_values,
-                    "in_schema": pn in schema_names,
-                })
+                if not bench_values:
+                    for bp_name, bp_vals in bench_by_prop.items():
+                        if _normalize_match_value(bp_name) == pn_norm:
+                            bench_values = bp_vals
+                            break
+
+                in_schema = pn in schema_names or pn_norm in schema_names_norm
+
+                sub_values = [s.strip() for s in pv_str.split(",") if s.strip()]
+                if not sub_values:
+                    sub_values = [pv_str]
+
+                for sv in sub_values:
+                    tasks.append({
+                        "item_id": item_id,
+                        "cate1_name": cate1,
+                        "cate_name": cate_name,
+                        "property_name": pn,
+                        "predicted_value": sv,
+                        "bench_values": bench_values,
+                        "all_bench_by_prop": bench_by_prop,
+                        "in_schema": in_schema,
+                    })
     return tasks
 
 
 async def run_eval(
     tasks: list[dict],
     cache: dict[str, dict],
+    name_equiv_cache: dict[str, dict],
     output_path: str,
     cache_path: str,
+    name_equiv_cache_path: str,
     client: ModelClient,
     system_prompt: str,
     user_template: str,
+    name_equiv_template: str,
     workers: int,
     request_workers: int,
     retry: int,
@@ -260,35 +399,31 @@ async def run_eval(
     write_lock = asyncio.Lock()
     cache_lock = asyncio.Lock()
 
-    stats = {"rule": 0, "cache": 0, "llm": 0, "no_bench": 0, "no_schema": 0, "failed": 0}
+    stats = {"rule": 0, "cache": 0, "cross_name_rule": 0, "cross_name_llm": 0,
+             "llm": 0, "no_bench": 0, "no_schema": 0, "failed": 0}
 
     async def process_one(task: dict) -> None:
         pname = task["property_name"]
         pvalue = task["predicted_value"]
         bench_values = task["bench_values"]
+        all_bench = task["all_bench_by_prop"]
+        pname_norm = _normalize_match_value(pname)
 
-        if not bench_values:
-            if not task.get("in_schema", True):
-                method, reason = "no_schema", "predicted property not in cpv_schema"
-            else:
-                method, reason = "no_bench", "no benchmark values for this property"
-            result = {**task, "match_method": method, "is_correct": False, "matched_bench_values": [], "reason": reason}
-            stats[method] += 1
-            async with write_lock:
-                with open(output_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
-            return
-
-        async with semaphore:
+        # --- Step 1: same-name rule match ---
+        if bench_values:
             rule_results = rule_match_all(pvalue, bench_values)
             if rule_results:
-                result = {**task, "match_method": "rule", "is_correct": True, "matched_bench_values": rule_results, "reason": "rule match"}
+                result = {**task, "match_method": "rule", "is_correct": True,
+                          "matched_bench_values": rule_results, "reason": "rule match"}
+                del result["all_bench_by_prop"]
                 stats["rule"] += 1
                 async with write_lock:
                     with open(output_path, "a", encoding="utf-8") as f:
                         f.write(json.dumps(result, ensure_ascii=False) + "\n")
                 return
 
+        # --- Step 2: same-name cache ---
+        if bench_values:
             cache_key = make_cache_key(pname, pvalue, bench_values)
             async with cache_lock:
                 cached = cache.get(cache_key)
@@ -303,42 +438,127 @@ async def run_eval(
                     "matched_bench_values": cached_matched,
                     "reason": cached.get("reason", ""),
                 }
+                del result["all_bench_by_prop"]
                 stats["cache"] += 1
                 async with write_lock:
                     with open(output_path, "a", encoding="utf-8") as f:
                         f.write(json.dumps(result, ensure_ascii=False) + "\n")
                 return
 
-            llm_result = await call_judge(
-                client, request_semaphore, system_prompt, user_template,
-                pname, pvalue, bench_values, retry,
-            )
+        # --- Step 3: cross-name value rule match ---
+        async with semaphore:
+            cross_name_result = None
+            for other_pn_orig, other_values in all_bench.items():
+                other_pn_norm = _normalize_match_value(other_pn_orig)
+                if other_pn_norm == pname_norm:
+                    continue
+                cross_rule = rule_match_all(pvalue, other_values)
+                if not cross_rule:
+                    continue
 
-            if llm_result["status"] == "success":
-                cache_entry = {
-                    "key": [pname, pvalue, sorted(bench_values)],
-                    "is_correct": llm_result["is_correct"],
-                    "matched_bench_values": llm_result["matched_bench_values"],
-                    "reason": llm_result["reason"],
-                }
+                # 3a: name equivalence by rule (NFKC exact match only)
+                if _names_equivalent_by_rule(pname, other_pn_orig):
+                    cross_name_result = ("cross_name_rule", cross_rule, other_pn_orig, "name rule match")
+                    break
+
+                # 3b: name equivalence by LLM (with cache)
+                ne_cache_key = make_name_equiv_cache_key(pname, other_pn_orig, task["cate_name"])
                 async with cache_lock:
-                    cache[cache_key] = cache_entry
-                async with write_lock:
-                    with open(cache_path, "a", encoding="utf-8") as f:
-                        f.write(json.dumps(cache_entry, ensure_ascii=False) + "\n")
+                    ne_cached = name_equiv_cache.get(ne_cache_key)
+                if ne_cached is not None:
+                    if ne_cached.get("is_equivalent"):
+                        cross_name_result = ("cross_name_llm", cross_rule, other_pn_orig, ne_cached.get("reason", "cached"))
+                        break
+                    continue
 
+                ne_result = await call_name_equiv_judge(
+                    client, request_semaphore, name_equiv_template,
+                    pname, other_pn_orig, pvalue,
+                    task["cate1_name"], task["cate_name"], retry,
+                )
+                if ne_result["status"] == "success":
+                    ne_entry = {
+                        "key": sorted([pname, other_pn_orig]) + [task["cate_name"]],
+                        "is_equivalent": ne_result["is_equivalent"],
+                        "reason": ne_result["reason"],
+                    }
+                    async with cache_lock:
+                        name_equiv_cache[ne_cache_key] = ne_entry
+                    async with write_lock:
+                        with open(name_equiv_cache_path, "a", encoding="utf-8") as f:
+                            f.write(json.dumps(ne_entry, ensure_ascii=False) + "\n")
+
+                    if ne_result["is_equivalent"]:
+                        cross_name_result = ("cross_name_llm", cross_rule, other_pn_orig, ne_result["reason"])
+                        break
+
+            if cross_name_result:
+                method, matched, other_pn, reason = cross_name_result
                 result = {
                     **task,
-                    "match_method": "llm",
-                    "is_correct": llm_result["is_correct"],
-                    "matched_bench_values": llm_result["matched_bench_values"],
-                    "reason": llm_result["reason"],
+                    "match_method": method,
+                    "is_correct": True,
+                    "matched_bench_values": matched,
+                    "cross_matched_property": other_pn,
+                    "reason": reason,
                 }
-                stats["llm"] += 1
-            else:
-                result = {**task, "match_method": "failed", "is_correct": False, "matched_bench_values": [], "reason": llm_result["reason"]}
-                stats["failed"] += 1
+                del result["all_bench_by_prop"]
+                stats[method] += 1
+                async with write_lock:
+                    with open(output_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                return
 
+            # --- Step 4: same-name LLM value judge ---
+            if bench_values:
+                llm_result = await call_judge(
+                    client, request_semaphore, system_prompt, user_template,
+                    pname, pvalue, bench_values, retry,
+                )
+
+                if llm_result["status"] == "success":
+                    cache_entry = {
+                        "key": [pname, pvalue, sorted(bench_values)],
+                        "is_correct": llm_result["is_correct"],
+                        "matched_bench_values": llm_result["matched_bench_values"],
+                        "reason": llm_result["reason"],
+                    }
+                    cache_key = make_cache_key(pname, pvalue, bench_values)
+                    async with cache_lock:
+                        cache[cache_key] = cache_entry
+                    async with write_lock:
+                        with open(cache_path, "a", encoding="utf-8") as f:
+                            f.write(json.dumps(cache_entry, ensure_ascii=False) + "\n")
+
+                    result = {
+                        **task,
+                        "match_method": "llm",
+                        "is_correct": llm_result["is_correct"],
+                        "matched_bench_values": llm_result["matched_bench_values"],
+                        "reason": llm_result["reason"],
+                    }
+                    del result["all_bench_by_prop"]
+                    stats["llm"] += 1
+                else:
+                    result = {**task, "match_method": "failed", "is_correct": False,
+                              "matched_bench_values": [], "reason": llm_result["reason"]}
+                    del result["all_bench_by_prop"]
+                    stats["failed"] += 1
+
+                async with write_lock:
+                    with open(output_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                return
+
+            # --- Step 5: unresolved ---
+            if not task.get("in_schema", True):
+                method, reason = "no_schema", "predicted property not in cpv_schema"
+            else:
+                method, reason = "no_bench", "no benchmark values for this property"
+            result = {**task, "match_method": method, "is_correct": False,
+                      "matched_bench_values": [], "reason": reason}
+            del result["all_bench_by_prop"]
+            stats[method] += 1
             async with write_lock:
                 with open(output_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(result, ensure_ascii=False) + "\n")
@@ -361,9 +581,9 @@ def main() -> None:
     parser.add_argument("--api-base", default=None)
     parser.add_argument("--enable-thinking", action="store_true")
     parser.add_argument("--max-tokens", type=int, default=None,
-                        help="Maximum generated tokens (default: 8192 for OpenAI)")
-    parser.add_argument("--workers", type=int, default=20)
-    parser.add_argument("--request-workers", type=int, default=60)
+                        help="Maximum generated tokens (default: 8192)")
+    parser.add_argument("--workers", type=int, default=50)
+    parser.add_argument("--request-workers", type=int, default=100)
     parser.add_argument("--retry", type=int, default=3)
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--retry-failed", action="store_true")
@@ -375,9 +595,11 @@ def main() -> None:
 
     cache_dir = args.cache_dir or os.path.dirname(os.path.abspath(args.output))
     cache_path = os.path.join(cache_dir, "eval_cache.jsonl")
+    name_equiv_cache_path = os.path.join(cache_dir, "name_equiv_cache.jsonl")
 
     cache = load_cache(cache_path)
-    print(f"[cache] {len(cache)} entries loaded")
+    name_equiv_cache = load_cache(name_equiv_cache_path)
+    print(f"[cache] {len(cache)} value entries, {len(name_equiv_cache)} name-equiv entries")
 
     tasks = prepare_eval_tasks(args.input)
     print(f"[tasks] {len(tasks)} attribute evaluations")
@@ -433,6 +655,7 @@ def main() -> None:
             return
 
     system_prompt, user_template = _load_judge_prompts()
+    name_equiv_template = _load_name_equiv_prompt()
     client = create_client(
         provider=args.provider,
         model=args.model,
@@ -445,11 +668,14 @@ def main() -> None:
     stats = asyncio.run(run_eval(
         tasks=tasks,
         cache=cache,
+        name_equiv_cache=name_equiv_cache,
         output_path=args.output,
         cache_path=cache_path,
+        name_equiv_cache_path=name_equiv_cache_path,
         client=client,
         system_prompt=system_prompt,
         user_template=user_template,
+        name_equiv_template=name_equiv_template,
         workers=args.workers,
         request_workers=args.request_workers,
         retry=args.retry,

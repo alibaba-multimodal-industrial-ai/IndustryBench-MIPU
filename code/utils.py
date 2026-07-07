@@ -5,6 +5,14 @@ import re
 from typing import Any
 
 
+def _strip_think_prefix(text: str) -> str:
+    """Strip everything up to and including </think> tag (SFT models may emit thinking)."""
+    idx = text.find("</think>")
+    if idx != -1:
+        return text[idx + len("</think>"):].strip()
+    return text
+
+
 def strip_code_fence(text: str) -> str:
     """Remove markdown code fences (```...```) wrapping JSON output."""
     text = text.strip()
@@ -27,6 +35,7 @@ def parse_json_response(text: str) -> dict | None:
     if not text:
         return None
 
+    text = _strip_think_prefix(text)
     cleaned = strip_code_fence(text)
     if not cleaned:
         return None

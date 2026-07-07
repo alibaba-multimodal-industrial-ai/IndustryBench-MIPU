@@ -53,18 +53,32 @@ def load_bench(path: str) -> dict[str, dict[str, Any]]:
                 continue
             record = json.loads(line)
             iid = record.get("record_id", "") or record.get("item_id", "")
-            cpv_results = record.get("cpv_results", [])
+            cpv_results = record.get("cpv_results", {})
             props: dict[str, list[str]] = {}
-            for item in cpv_results:
-                if not isinstance(item, dict):
-                    continue
-                if item.get("dropped", False):
-                    continue
-                pname = (item.get("property_name") or "").strip()
-                pvalue = item.get("property_value")
-                if not pname or pvalue in (None, "", []):
-                    continue
-                props.setdefault(pname, []).append(str(pvalue).strip())
+            if isinstance(cpv_results, dict):
+                for pname, pv_list in cpv_results.items():
+                    pname = pname.strip()
+                    if not pname:
+                        continue
+                    if isinstance(pv_list, list):
+                        vals = [str(v).strip() for v in pv_list if v not in (None, "", [])]
+                    elif pv_list not in (None, "", []):
+                        vals = [str(pv_list).strip()]
+                    else:
+                        continue
+                    if vals:
+                        props[pname] = vals
+            elif isinstance(cpv_results, list):
+                for item in cpv_results:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("dropped", False):
+                        continue
+                    pname = (item.get("property_name") or "").strip()
+                    pvalue = item.get("property_value")
+                    if not pname or pvalue in (None, "", []):
+                        continue
+                    props.setdefault(pname, []).append(str(pvalue).strip())
             bench[iid] = {
                 "properties": props,
                 "cate1_name": record.get("cate1_name", ""),
@@ -171,6 +185,8 @@ def compute_error_breakdown(eval_results: list[dict]) -> dict[str, int]:
         method = row.get("match_method", "")
         if method in ("no_bench", "no_schema"):
             errors["extra_property"] += 1
+        elif method == "cross_name_llm":
+            errors["name_mismatch"] += 1
         else:
             errors["value_mismatch"] += 1
     return dict(errors)
